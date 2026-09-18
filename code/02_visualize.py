@@ -110,6 +110,59 @@ growth_ranking.save(
     str(FIGURES_DIR / "ev_growth_ranking.html")
 )
 
+# Rank counties by 2025 plug-in vehicle stock
+stock_base = alt.Chart(data).encode(
+    x=alt.X(
+        "EV_2025:Q",
+        title="Plug-in vehicles (BEV + PHEV)",
+        axis=alt.Axis(format=","),
+        scale=alt.Scale(domain=[0, data["EV_2025"].max() * 1.15])
+    ),
+    y=alt.Y(
+        "County:N",
+        sort=alt.EncodingSortField(
+            field="EV_2025",
+            order="descending",
+            op="max"
+        ),
+        title=None
+    ),
+    tooltip=[
+        alt.Tooltip("County:N"),
+        alt.Tooltip(
+            "EV_2025:Q",
+            title="2025 vehicle stock",
+            format=","
+        ),
+        alt.Tooltip(
+            "EV_Growth_Rate:Q",
+            title="Growth, 2023–2025",
+            format=".1%"
+        )
+    ]
+)
+
+stock_bars = stock_base.mark_bar(color="#39856A")
+
+stock_labels = stock_base.mark_text(
+    align="left",
+    dx=5
+).encode(
+    text=alt.Text("EV_2025:Q", format=",")
+)
+
+stock_ranking = (stock_bars + stock_labels).properties(
+    width=800,
+    height=alt.Step(20),
+    title=alt.TitleParams(
+        text="Plug-in vehicle stock by California county, 2025",
+        subtitle="Battery electric and plug-in hybrid vehicles; year-end 2025"
+    )
+)
+
+stock_ranking.save(
+    str(FIGURES_DIR / "ev_stock_ranking.html")
+)
 
 # Compare EV growth with public charging provision
 points = alt.Chart(data).mark_circle(
