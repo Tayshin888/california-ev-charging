@@ -161,7 +161,62 @@ fig.text(
 
 # Save the high-resolution figure
 
-output_file = FIGURES_DIR / "ev_population_changes.png"
-fig.savefig(output_file, dpi=300, bbox_inches="tight", pad_inches=0.20)
+# Save the high-resolution PNG
+png_file = FIGURES_DIR / "ev_population_changes.png"
+
+fig.savefig(
+    png_file,
+    dpi=300,
+    bbox_inches="tight",
+    pad_inches=0.20
+)
+
 plt.close(fig)
-print("Saved to:", output_file)
+
+print("Saved to:", png_file)
+
+
+# Save an HTML version
+html_file = FIGURES_DIR / "ev_population_changes.html"
+
+html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>EV and population change across California counties</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 30px;
+            background-color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+
+        img {
+            width: 100%;
+            max-width: 1800px;
+            height: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+    <img
+        src="ev_population_changes.png"
+        alt="EV and population change across California counties"
+    >
+
+</body>
+</html>
+"""
+
+html_file.write_text(
+    html_content,
+    encoding="utf-8"
+)
+
+print("Saved to:", html_file)
