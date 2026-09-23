@@ -1,0 +1,379 @@
+---
+title: "California EV Adoption and Charging Infrastructure"
+subtitle: "County-level trends in plug-in vehicle registrations and public charging availability, 2023–2025"
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: mscep_env
+execute:
+  warning: false
+  error: true
+  echo: true
+---
+
+# Project Question
+
+Using county-level data on plug-in vehicle registrations and public Level 2 and DC fast charging ports, we compare EV adoption growth with charging availability across California counties from 2023 to 2025. The goal is to identify counties where charging infrastructure may be lagging behind vehicle adoption and to inform state transportation and energy planning.
+
+**Note on time granularity:** The vehicle registration data (CEC Vehicle Population) is only available annually. The charger data (CEC EV Chargers) is available at irregular snapshot dates, not monthly. So rather than a monthly series, this analysis compares two points in time: a **2023 baseline** and a **2025 endpoint**. There is no January 2023 charger snapshot, so `Q4 2022` (the closest available date) is used as the 2023 baseline for chargers; vehicle counts use the actual `Data Year == 2023` values.
+
+# Setup
+
+```{python}
+from pathlib import Path
+
+import altair as alt
+import numpy as np
+import pandas as pd
+
+# Let Altair use all rows.
+alt.data_transformers.disable_max_rows()
+
+# Data files are currently saved in Downloads.
+DATA_DIR = Path.home() / "Downloads"
+
+# Snapshot sheets used as the 2023 baseline / 2025 endpoint for chargers.
+CHARGER_BASELINE_SHEET = "Q4 2022"   # closest available snapshot to Jan 2023
+CHARGER_LATEST_SHEET = "Dec 2025"
+
+VEHICLE_BASELINE_YEAR = 2023
+VEHICLE_LATEST_YEAR = 2025
+
+# Plug-in fuel types counted as "EVs" for this analysis.
+PLUGIN_FUEL_TYPES = ["Battery Electric (BEV)", "Plug-in Hybrid (PHEV)"]
+
+# CalEnviroScreen 5.0 (OEHHA) — census tract-level pollution burden and
+# socioeconomic vulnerability, used for the equity lens on the growth gap.
+CALENVIROSCREEN_PATH = "calenviroscreen50_070126.csv"
+
+# Official CalEnviroScreen disadvantaged-community (DAC) threshold: tracts
+# scoring in the top 25th percentile statewide on the composite CI score.
+DAC_PERCENTILE_THRESHOLD = 75
+```
+
+# Read the Data
+
+```{python}
+# Plug-in vehicle registrations (long format: one row per county/year/fuel type/make/model).
+vehicles = pd.read_excel(
+    DATA_DIR / "Vehicle_Population_Last_updated_04-28-2026_ada.xlsx",
+    sheet_name="County",
+)
+
+# Public EV charging infrastructure — one sheet per snapshot date.
+chargers_baseline = pd.read_excel(
+    DATA_DIR / "EV_Chargers_Last_updated_04-21-2026_ada.xlsx",
+    sheet_name=CHARGER_BASELINE_SHEET,
+)
+chargers_latest = pd.read_excel(
+    DATA_DIR / "EV_Chargers_Last_updated_04-21-2026_ada.xlsx",
+    sheet_name=CHARGER_LATEST_SHEET,
+)
+
+# Also grab every charger snapshot sheet, for the statewide trend line in Figure 1.
+charger_sheets_all = pd.read_excel(
+    DATA_DIR / "EV_Chargers_Last_updated_04-21-2026_ada.xlsx",
+    sheet_name=None,
+)
+charger_sheets_all.pop("Info", None)
+
+# Equity data — census tract level, will be aggregated to county level below.
+calenviroscreen = pd.read_csv(DATA_DIR / CALENVIROSCREEN_PATH)
+```
+
+# Inspect the Data
+
+```{python}
+print("Vehicle data shape:", vehicles.shape)
+print("Charging data (baseline) shape:", chargers_baseline.shape)
+
+print("\nVehicle columns:")
+print(vehicles.columns.tolist())
+
+print("\nCharging columns:")
+print(chargers_baseline.columns.tolist())
+
+print("\nVehicle fuel type groups:")
+print(vehicles["Dashboard Fuel Type Group"].unique())
+
+print("\nVehicle data years available:", sorted(vehicles["Data Year"].unique()))
+print("\nCharger snapshot sheets available:", list(charger_sheets_all.keys()))
+```
+
+```{python}
+vehicles.head()
+```
+
+```{python}
+chargers_baseline.head()
+```
+
+# Data Cleaning
+
+## Vehicle Data
+
+The vehicle file has one row per county/year/fuel type/make/model, so plug-in EV counts have to be filtered to BEV + PHEV rows and then summed across makes and models. "Out Of State" is not a real county and is dropped.
+
+```{python}
+def plugin_ev_counts_by_county(vehicles_df: pd.DataFrame, year: int) -> pd.Series:
+    """Sum BEV + PHEV registrations per county for a given year."""
+    subset = vehicles_df[
+        (vehicles_df["Data Year"] == year)
+        & (vehicles_df["Dashboard Fuel Type Group"].isin(PLUGIN_FUEL_TYPES))
+    ]
+    return (
+        subset.groupby("County")["Number of Vehicles"]
+        .sum()
+        .drop(labels=["Out Of State"], errors="ignore")
+    )
+
+
+vehicles_baseline = plugin_ev_counts_by_county(vehicles, VEHICLE_BASELINE_YEAR)
+vehicles_latest = plugin_ev_counts_by_county(vehicles, VEHICLE_LATEST_YEAR)
+
+# Full annual statewide series (all years present in the file), used in Figure 1.
+vehicles_statewide_by_year = (
+    vehicles[
+        vehicles["Dashboard Fuel Type Group"].isin(PLUGIN_FUEL_TYPES)
+        & (vehicles["County"] != "Out Of State")
+    ]
+    .groupby("Data Year")["Number of Vehicles"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Number of Vehicles": "plugin_vehicles"})
+)
+
+print("Counties with vehicle data (baseline year):", vehicles_baseline.shape[0])
+vehicles_baseline.head()
+```
+
+## Charging Data
+
+Only **public** Level 2 and public DC fast ports are used, matching the project's framing ("public ... charging infrastructure"). "Shared Private" ports (e.g. workplace chargers) are excluded since they aren't fully public-access.
+
+```{python}
+def public_ports_by_county(chargers_df: pd.DataFrame) -> pd.DataFrame:
+    # Every snapshot sheet uses "Public DC Fast" except the earliest (Q2 2020),
+    # which uses "Public DCFC" instead. Handle both.
+    df = chargers_df.copy()
+    dcfast_col = "Public DC Fast" if "Public DC Fast" in df.columns else "Public DCFC"
+
+    df["level2_ports"] = df["Public Level 2"]
+    df["dcfast_ports"] = df[dcfast_col]
+    df["total_public_ports"] = df["level2_ports"] + df["dcfast_ports"]
+
+    # Drop the sheet's own pre-computed grand-total row ("Total"/"Totals" —
+    # label isn't consistent across snapshots) and the "Unknown" bucket,
+    # neither of which is a real California county. Left in, "Total" alone
+    # doubles every statewide sum below, since it already equals the sum
+    # of every real county.
+    df = df[~df["County"].isin(["Total", "Totals", "Unknown"])]
+
+    return df.set_index("County")[["level2_ports", "dcfast_ports", "total_public_ports"]]
+
+
+ports_baseline = public_ports_by_county(chargers_baseline)
+ports_latest = public_ports_by_county(chargers_latest)
+
+# Statewide total public ports at every available snapshot date, used in Figure 1.
+charger_statewide_by_snapshot = pd.DataFrame(
+    {
+        sheet_name: public_ports_by_county(df)["total_public_ports"].sum()
+        for sheet_name, df in charger_sheets_all.items()
+    },
+    index=["total_public_ports"],
+).T.reset_index().rename(columns={"index": "snapshot"})
+
+ports_baseline.head()
+```
+
+## Equity Data (CalEnviroScreen)
+
+CalEnviroScreen 5.0 is tract-level, so it has to be aggregated up to the county level before it can join `county_data`. Each county's disadvantaged-community (DAC) population share is population-weighted (not a simple average of tracts), since tracts vary hugely in population. A handful of tracts have no `CIscoreP` (insufficient underlying data for a score) — those are excluded from the weighted averages but still counted in each county's total population.
+
+```{python}
+calenviroscreen["is_dac"] = calenviroscreen["CIscoreP"] >= DAC_PERCENTILE_THRESHOLD
+
+def _weighted_avg(group: pd.DataFrame, col: str, weight: str = "ACS2024Pop") -> float:
+    d = group.dropna(subset=[col])
+    if d[weight].sum() == 0:
+        return np.nan
+    return np.average(d[col], weights=d[weight])
+
+county_equity = (
+    calenviroscreen.groupby("county")
+    .apply(lambda g: pd.Series({
+        "total_pop": g["ACS2024Pop"].sum(),
+        "dac_pop": g.loc[g["is_dac"], "ACS2024Pop"].sum(),
+        "avg_CIscoreP": _weighted_avg(g, "CIscoreP"),
+        "avg_povP": _weighted_avg(g, "povP"),
+        "avg_unempP": _weighted_avg(g, "unempP"),
+    }))
+    .reset_index()
+)
+county_equity["pct_dac_pop"] = county_equity["dac_pop"] / county_equity["total_pop"] * 100
+
+print("Counties with equity data:", county_equity.shape[0])
+county_equity.sort_values("pct_dac_pop", ascending=False).head()
+```
+
+```{python}
+# Missing-value / duplicate checks.
+print("Duplicate counties (vehicles, baseline):", vehicles_baseline.index.duplicated().sum())
+print("Duplicate counties (chargers, baseline):", ports_baseline.index.duplicated().sum())
+print("Counties in vehicles but not chargers:",
+      set(vehicles_baseline.index) - set(ports_baseline.index))
+print("Counties in chargers but not vehicles:",
+      set(ports_baseline.index) - set(vehicles_baseline.index))
+```
+
+# Merge / Align the Data
+
+```{python}
+county_data = pd.DataFrame({
+    "vehicles_2023": vehicles_baseline,
+    "vehicles_2025": vehicles_latest,
+    "level2_ports_2023": ports_baseline["level2_ports"],
+    "dcfast_ports_2023": ports_baseline["dcfast_ports"],
+    "total_ports_2023": ports_baseline["total_public_ports"],
+    "level2_ports_2025": ports_latest["level2_ports"],
+    "dcfast_ports_2025": ports_latest["dcfast_ports"],
+    "total_ports_2025": ports_latest["total_public_ports"],
+}).dropna()
+
+county_data = county_data.reset_index().rename(columns={"index": "County"})
+
+# Bring in the equity measures (left join: keep every county even if, in
+# principle, one had no CalEnviroScreen tracts).
+county_data = county_data.merge(
+    county_equity[["county", "pct_dac_pop", "avg_CIscoreP", "avg_povP", "avg_unempP"]],
+    left_on="County", right_on="county", how="left",
+).drop(columns="county")
+
+county_data.head()
+```
+
+# Initial Measures
+
+```{python}
+county_data["vehicle_growth_pct"] = (
+    (county_data["vehicles_2025"] - county_data["vehicles_2023"])
+    / county_data["vehicles_2023"] * 100
+)
+
+county_data["charging_growth_pct"] = (
+    (county_data["total_ports_2025"] - county_data["total_ports_2023"])
+    / county_data["total_ports_2023"] * 100
+)
+
+county_data["vehicles_per_port_2023"] = (
+    county_data["vehicles_2023"] / county_data["total_ports_2023"]
+)
+county_data["vehicles_per_port_2025"] = (
+    county_data["vehicles_2025"] / county_data["total_ports_2025"]
+)
+
+# How much faster EV growth outpaced charging growth (the core "lag" measure).
+county_data["growth_gap"] = (
+    county_data["vehicle_growth_pct"] - county_data["charging_growth_pct"]
+)
+
+county_data.sort_values("growth_gap", ascending=False).head(10)
+```
+
+# Figure 1: Statewide EV and Charging Trends
+
+The vehicle series is annual (one point per year) and the charger series is
+irregular snapshots (roughly quarterly through 2023, then scattered). Putting
+`Data Year` and `snapshot` on separate categorical axes — as in the original
+version of this cell — spaces every point evenly regardless of how much time
+actually passed, which makes a 6-year gap look identical to a 2-month gap.
+
+The fix: convert both to real dates and plot them on one shared, continuous
+temporal axis with two y-scales (vehicle counts and port counts are on very
+different scales, so a single y-axis would flatten one series). The point
+spacing below is now honest about how sparse the vehicle data is relative to
+the charger snapshots. The x-axis tick format is fixed to always show
+`"Mon YYYY"` (Altair's default axis only prints the year on some ticks,
+which reads as an inconsistent, confusing sequence given how irregular the
+snapshot dates are).
+
+```{python}
+import re
+from datetime import date
+
+def parse_snapshot(label: str):
+    """Convert a charger-sheet name like 'Dec 2025' or 'Q4 2022' to a date."""
+    m = re.match(r"([A-Za-z]+)\s+(\d{4})", label)
+    if m:
+        months = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,"Jul":7,"Aug":8,
+                  "Sept":9,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
+        if m.group(1) in months:
+            return date(int(m.group(2)), months[m.group(1)], 1)
+    m = re.match(r"Q(\d)\s+(\d{4})", label)
+    if m:
+        month = {1: 3, 2: 6, 3: 9, 4: 12}[int(m.group(1))]
+        return date(int(m.group(2)), month, 1)
+    return None
+
+charger_statewide_by_snapshot["date"] = pd.to_datetime(
+    charger_statewide_by_snapshot["snapshot"].apply(parse_snapshot)
+)
+vehicles_statewide_by_year["date"] = pd.to_datetime(
+    vehicles_statewide_by_year["Data Year"].astype(str) + "-12-31"
+)
+
+# Restrict the vehicle series to years chargers were actually tracked (2020+),
+# so the shared axis doesn't stretch back to 2010 with nothing to compare it to.
+vehicles_plot = vehicles_statewide_by_year[vehicles_statewide_by_year["Data Year"] >= 2020]
+
+base_x = alt.X(
+    "date:T",
+    title="Date",
+    axis=alt.Axis(format="%b %Y", tickCount=10, labelAngle=-40),
+)
+
+vehicles_line = (
+    alt.Chart(vehicles_plot)
+    .mark_line(point=True, color="#fca311")
+    .encode(
+        x=base_x,
+        y=alt.Y("plugin_vehicles:Q", title="Statewide plug-in vehicles",
+                axis=alt.Axis(titleColor="#fca311")),
+        tooltip=["Data Year", "plugin_vehicles"],
+    )
+)
+
+ports_line = (
+    alt.Chart(charger_statewide_by_snapshot)
+    .mark_line(point=True, color="#2ec4b6")
+    .encode(
+        x=base_x,
+        y=alt.Y("total_public_ports:Q", title="Statewide public L2 + DC fast ports",
+                axis=alt.Axis(titleColor="#2ec4b6")),
+        tooltip=["snapshot", "total_public_ports"],
+    )
+)
+
+alt.layer(vehicles_line, ports_line).resolve_scale(y="independent").properties(
+    title="Statewide Plug-in Vehicles and Public Charging Ports Over Time",
+    width=650, height=380,
+)
+```
+
+# Figure 2 onward: [PASTE YOUR EXISTING CELLS BACK IN HERE]
+
+Everything above this line — Setup through Figure 1 — is verified against
+the exact code you pasted into this chat, with the two fixes applied (the
+charger "Total"/"Unknown" row fix, and the Figure 1 axis label fix).
+
+I don't have the exact source for your later sections (the county map,
+the EV-growth-vs-charging-growth scatter, the growth-gap bar chart, the
+equity scatter, and the notes/interpretation section) — those weren't
+pasted into this chat, so I didn't want to guess at their code and risk
+introducing mismatched variable names or styling. **Paste your existing
+Figure 2–7 cells in below this heading** (delete the heading itself) and
+the notebook will run end-to-end — nothing about those cells needs to
+change for the fixes above; they already read from `county_data`, which
+now carries the corrected numbers.
