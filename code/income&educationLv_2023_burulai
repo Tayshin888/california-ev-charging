@@ -1,0 +1,170 @@
+```{python}
+from pathlib import Path
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+DATA_DIR = Path("Data")
+
+vehicles = pd.read_excel(
+    DATA_DIR / "2023-2024 EVs.xlsx")
+edu_2023 = pd.read_excel(
+    DATA_DIR / "2023 edu.xlsx",
+    sheet_name="Data",
+    header=None)
+
+income_2023 = pd.read_excel(
+    DATA_DIR / "2023 median income.xlsx",
+    sheet_name="Data",
+    header=None)
+
+population_2023 = pd.read_excel(
+    DATA_DIR / "Population 2023.xlsx",
+    sheet_name="Data",
+    header=None)
+#------------------------------
+```
+```{python}
+vehicles_2023 = vehicles[
+    vehicles["Data Year"] == 2023]
+ev_2023 = (
+    vehicles_2023
+    .groupby("County", as_index=False)["Number of Vehicles"]
+    .sum())
+#------------------------------
+```
+```{python}
+education_data_2023 = []
+
+for col in range(len(edu_2023.columns)):
+    county = edu_2023.iloc[0, col]
+
+    if isinstance(county, str) and "County, California" in county:
+        county_name = county.replace(" County, California", "")
+
+        education = edu_2023.iloc[18, col + 2]
+        education = float(education.replace("%", ""))
+
+        education_data_2023.append(
+            [county_name, education])
+
+education_df_2023 = pd.DataFrame(
+    education_data_2023,
+    columns=["County", "education_pct"])
+#------------------------------
+```
+```{python}
+income_data_2023 = []
+
+for col in range(len(income_2023.columns)):
+    county = income_2023.iloc[0, col]
+
+    if isinstance(county, str) and "County, California" in county:
+        county_name = county.replace(" County, California", "")
+
+        income = income_2023.iloc[4, col + 4]
+        income = float(str(income).replace(",", ""))
+
+        income_data_2023.append(
+            [county_name, income]
+        )
+
+income_df_2023 = pd.DataFrame(
+    income_data_2023,
+    columns=["County", "median_income"])
+#------------------------------
+```
+```{python}
+population_data_2023 = []
+
+for col in range(len(population_2023.columns)):
+    county = population_2023.iloc[0, col]
+
+    if isinstance(county, str) and "County, California" in county:
+        county_name = county.replace(" County, California", "")
+
+        population = population_2023.iloc[2, col]
+        population = float(str(population).replace(",", ""))
+
+        population_data_2023.append(
+            [county_name, population]
+        )
+
+population_df_2023 = pd.DataFrame(
+    population_data_2023,
+    columns=["County", "population"])
+#------------------------------
+```
+```{python}
+data_2023 = ev_2023.merge(
+    education_df_2023,
+    on="County",
+    how="inner")
+
+data_2023 = data_2023.merge(
+    income_df_2023,
+    on="County",
+    how="inner"
+)
+
+data_2023 = data_2023.merge(
+    population_df_2023,
+    on="County",
+    how="inner")
+#------------------------------
+```
+```{python}
+data_2023["vehicles_per_1000"] = (
+    data_2023["Number of Vehicles"]
+    / data_2023["population"]
+    * 1000)
+#------------------------------
+```
+```{python}
+data_2023
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+axes[0].scatter(
+    data_2023["education_pct"],
+    data_2023["vehicles_per_1000"],
+    alpha=0.6
+)
+
+axes[0].set_title("Education and plug-in vehicle adoption, 2023")
+axes[0].set_xlabel("Bachelor's degree or higher (%)")
+axes[0].set_ylabel("Plug-in vehicles per 1,000 people")
+
+
+axes[1].scatter(
+    data_2023["median_income"],
+    data_2023["vehicles_per_1000"],
+    alpha=0.6
+)
+
+axes[1].set_title("Income and plug-in vehicle adoption, 2023")
+axes[1].set_xlabel("Median household income ($)")
+axes[1].set_ylabel("Plug-in vehicles per 1,000 people")
+
+plt.tight_layout()
+
+fig.subplots_adjust(bottom=0.18)
+
+fig.text(
+    0.01,
+    0.03,
+    "Source: U.S. Census Bureau ACS and California vehicle registration data.",
+    fontsize=9
+)
+
+plt.show()
+#------------------------------
+```
+```{python}
+
+#------------------------------
+```
+```{python}
+
+#------------------------------
+```
