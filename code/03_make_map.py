@@ -99,7 +99,7 @@ for _, row in top_counties.iterrows():
         point.x,
         point.y,
         row["County"],
-        fontsize=6,
+        fontsize=10,
         ha="center",
         color="white",
         fontweight="bold"
